@@ -84,3 +84,52 @@ jobs:
           else
             echo "- 未产出结论文案，请查看上方日志" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  keepalive:
+    # 防「60 天无活动自动禁用」：public 仓库的定时任务会被 GitHub 自动关闭，
+    # 而定时运行本身不算活动（只认 commit/push）。这里用两个手段兜底：
+    #   1) 调 enable 接口把计时清零（未文档化，但实践有效）
+    #   2) 每 25 天产生一次真实的空提交（确定算作仓库活动）
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 重置定时任务计时并维持活动
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+
+          # 手段 1：把 schedule 的 60 天计时清零
+          if gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/daily.yml/enable" --silent; then
+            echo "已调用 enable，计时清零"
+          else
+            echo "::warning::enable 调用失败，仅依赖提交保活"
+          fi
+
+          # 手段 2：距上次保活提交超过 25 天就再提交一次
+          LAST=$(git log -1 --format=%ct -- .keepalive 2>/dev/null || echo 0)
+          NOW=$(date +%s)
+          if [ -z "$LAST" ] || [ "$LAST" = "0" ]; then
+            AGE=999
+          else
+            AGE=$(( (NOW - LAST) / 86400 ))
+          fi
+          echo "上次保活提交距今 ${AGE} 天"
+
+          if [ "$AGE" -ge 25 ]; then
+            date -u '+%Y-%m-%dT%H:%M:%SZ' > .keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .keepalive
+            git commit -m "chore: keepalive $(date -u +%Y-%m-%d)"
+            git push
+            echo "已提交保活（这是确定算作仓库活动的信号）"
+          else
+            echo "未到 25 天，跳过提交"
+          fi
